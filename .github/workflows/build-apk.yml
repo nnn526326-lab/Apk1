@@ -1,8 +1,15 @@
-
 name: Build NexendFLY APK
 
 on:
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        type: choice
+        options:
+          - debug
+          - release
+        default: debug
   push:
     paths:
       - 'apk_src.zip'
@@ -11,9 +18,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -29,16 +41,18 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
       - name: Extract ZIP
         run: |
-          test -f apk_src.zip
+          test -f apk_src.zip || { echo "ERROR: apk_src.zip tidak ditemukan!"; exit 1; }
+          rm -rf source
           mkdir -p source
           unzip -q apk_src.zip -d source
 
       - name: Locate Project
         run: |
-          FILE=$(find source \( -name settings.gradle -o -name settings.gradle.kts \) | head -n 1)
+          FILE=$(find source -not -path '*/__MACOSX/*' \( -name settings.gradle -o -name settings.gradle.kts \) | head -n 1)
 
           if [ -z "$FILE" ]; then
             echo "ERROR: Gradle project tidak ditemukan!"
@@ -47,40 +61,74 @@ jobs:
 
           echo "PROJECT_DIR=$(dirname "$FILE")" >> "$GITHUB_ENV"
 
-      - name: Automatic Kotlin Fixes
+      - name: Patch Kotlin Source
         run: |
-          FILE="$PROJECT_DIR/app/src/main/java/com/example/ui/screens/FlightLiveViewScreen.kt"
-          if [ -f "$FILE" ]; then
-            sed -i 's/fixType == 0/fixType == "0"/g' "$FILE"
+          FILE=$(find "$PROJECT_DIR" -name FlightLiveViewScreen.kt | head -n 1)
+          if [ -n "$FILE" ]; then
+            sed -i 's/state\.gps\.fixType > 0/state.gps.fixType != "NO FIX"/g' "$FILE"
+            grep -n 'fixType' "$FILE"
           fi
 
-          FILE="$PROJECT_DIR/app/src/main/java/com/example/video/NetworkCameraDiscovery.kt"
-          if [ -f "$FILE" ]; then
-            sed -i 's/hostName/host/g' "$FILE"
+          FILE=$(find "$PROJECT_DIR" -name NetworkCameraDiscovery.kt | head -n 1)
+          if [ -n "$FILE" ]; then
+            sed -i 's/java\.net\.InetAddress\.getByName(info\.hostName)\.hostAddress/info.host?.hostAddress/g' "$FILE"
+            grep -n 'info\.host' "$FILE"
           fi
 
-      - name: Build APK and Capture Errors
+      - name: Build APK
+        id: build
         run: |
           cd "$PROJECT_DIR"
 
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            TASK=assembleRelease
+          else
+            TASK=assembleDebug
+          fi
+
+          # Pakai wrapper kalau ada, kalau tidak pakai Gradle dari setup
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            CMD=./gradlew
+          else
+            CMD=gradle
+          fi
+
           set +e
-          gradle assembleDebug --no-daemon --stacktrace --console=plain 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
-          BUILD_STATUS=${PIPESTATUS[0]}
+          $CMD "$TASK" --no-daemon --stacktrace --console=plain 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          STATUS=${PIPESTATUS[0]}
           set -e
 
-          echo ""
-          echo "========== COMPILATION ERRORS =========="
-          grep -n -E '^e: | error:|What went wrong|Caused by:' "$GITHUB_WORKSPACE/build.log" | head -n 100 || true
-          echo "========================================="
+          exit "$STATUS"
 
-          exit "$BUILD_STATUS"
+      - name: Show Source Around Errors
+        if: failure()
+        run: |
+          grep -oE '^e: file://[^ ]+\.kt:[0-9]+:[0-9]+' build.log | sort -u | while IFS= read -r line; do
+            path=$(echo "$line" | sed -E 's#^e: file://(.*\.kt):[0-9]+:[0-9]+$#\1#')
+            ln=$(echo "$line" | sed -E 's#^e: file://.*\.kt:([0-9]+):[0-9]+$#\1#')
+            start=$((ln>3 ? ln-3 : 1))
+            echo "===== $path (baris $ln) ====="
+            sed -n "${start},$((ln+3))p" "$path" | cat -n
+          done | tee source_context.txt
+          { echo '## Source di sekitar error'; echo '```'; cat source_context.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summarize Errors
+        if: failure()
+        run: |
+          {
+            echo "## Compilation Errors"
+            echo '```'
+            grep -n -E '^e: | error:|What went wrong|Caused by:' build.log | head -n 100 || echo "Tidak ada pola error yang cocok, lihat build.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: NexendFLY-APK
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
           retention-days: 14
 
