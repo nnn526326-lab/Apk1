@@ -39,7 +39,12 @@ jobs:
       - name: Locate Project
         run: |
           FILE=$(find source \( -name settings.gradle -o -name settings.gradle.kts \) | head -n 1)
-          test -n "$FILE"
+
+          if [ -z "$FILE" ]; then
+            echo "ERROR: Gradle project tidak ditemukan!"
+            exit 1
+          fi
+
           echo "PROJECT_DIR=$(dirname "$FILE")" >> "$GITHUB_ENV"
 
       - name: Automatic Kotlin Fixes
@@ -54,15 +59,36 @@ jobs:
             sed -i 's/hostName/host/g' "$FILE"
           fi
 
-      - name: Build APK
+      - name: Build APK and Capture Errors
         run: |
           cd "$PROJECT_DIR"
-          gradle assembleDebug --no-daemon --stacktrace
+
+          set +e
+          gradle assembleDebug --no-daemon --stacktrace --console=plain 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          echo ""
+          echo "========== COMPILATION ERRORS =========="
+          grep -n -E '^e: | error:|What went wrong|Caused by:' "$GITHUB_WORKSPACE/build.log" | head -n 100 || true
+          echo "========================================="
+
+          exit "$BUILD_STATUS"
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: NexendFLY-APK
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexendFLY-Build-Log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
