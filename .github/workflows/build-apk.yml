@@ -25,20 +25,33 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
       - name: Extract ZIP
         run: |
           test -f apk_src.zip
-          mkdir source
+          mkdir -p source
           unzip -q apk_src.zip -d source
 
       - name: Locate project
         run: |
-          FILE=$(find source -name settings.gradle -o -name settings.gradle.kts | head -n 1)
+          FILE=$(find source \( -name settings.gradle -o -name settings.gradle.kts \) | head -n 1)
           test -n "$FILE"
-          echo "PROJECT_DIR=$(dirname "$FILE")" >> $GITHUB_ENV
+          PROJECT_DIR=$(dirname "$FILE")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.1.1'
+
+      - name: Generate Gradle Wrapper if missing
+        run: |
+          cd "$PROJECT_DIR"
+
+          if [ ! -f gradlew ]; then
+            gradle wrapper --gradle-version 9.1.1
+          fi
+
+          chmod +x gradlew
 
       - name: Automatic Kotlin fixes
         run: |
@@ -52,17 +65,15 @@ jobs:
             sed -i 's/hostName/host/g' "$FILE"
           fi
 
-      - name: Build Debug APK
+      - name: Build APK
         run: |
           cd "$PROJECT_DIR"
-          chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: NexendFLY-APK
-          path: |
-            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
